@@ -1,0 +1,188 @@
+#include <lpc214x.h>
+#include <stdio.h>
+
+#define bit(x) (1 << x)
+#define delay for(i = 0; i < 30000; i++);  // Increased delay for stable operation
+
+unsigned int i;
+#define TANK_HEIGHT_CM 30.0 // Maximum water level height
+#define FORCE_THRESHOLD 20  // Threshold for force sensor to activate buzzer
+#define WATER_LEVEL_THRESHOLD 25.0 // Threshold water level to activate buzzer
+#define TRIG_PIN (1 << 6) // P0.6 for Trigger
+#define ECHO_PIN (1 << 7) // P0.7 for Echo
+#define BUZZER_PIN (1 << 9) // P0.9 for the buzzer
+#define INTERNAL_LED (1 << 1) // P0.1 for internal LED
+
+void lcd_init(void);
+void dat(unsigned char);
+void cmd(unsigned char);
+void string(char *);
+void adc_init(void);
+unsigned int read_adc(void);
+float read_ultrasonic_distance(void);
+void timer_init(void);
+void display_sensor_values(float water_level, unsigned int force_value);
+
+int main() {
+    float distance, water_level;
+    unsigned int force_value;
+
+    IO0DIR |= (0x7F << 16); // Set P0.16 to P0.22 as output for LCD
+    IO0DIR |= TRIG_PIN;     // Set TRIG_PIN as output
+    IO0DIR &= ~ECHO_PIN;    // Set ECHO_PIN as input
+    IO0DIR |= BUZZER_PIN;   // Set buzzer pin as output
+
+    // Set internal LED pin (P0.1) as output
+    IO0DIR |= INTERNAL_LED; // Set internal LED pin as output (P0.1)
+
+    lcd_init();            // Initialize LCD
+    adc_init();            // Initialize ADC
+    timer_init();          // Initialize Timer
+
+    while (1) {
+        force_value = read_adc();               // Read ADC value from FSR
+        distance = read_ultrasonic_distance();  // Measure distance to water surface
+        water_level = TANK_HEIGHT_CM - distance; // Calculate water level height
+
+        // Limit the water level to be between 0 and 30 cm
+        if (water_level < 0) {
+            water_level = 0;
+        } else if (water_level > TANK_HEIGHT_CM) {
+            water_level = TANK_HEIGHT_CM;
+        }
+
+        display_sensor_values(water_level, force_value); // Display sensor values on LCD
+
+        // Check if either the force sensor or water level exceeds thresholds
+        if (force_value > FORCE_THRESHOLD || water_level > WATER_LEVEL_THRESHOLD) {
+            IO0SET |= BUZZER_PIN;  // Turn on buzzer
+            IO0SET |= INTERNAL_LED; // Turn on internal LED
+            delay;                   // Wait for a short time
+            IO0CLR |= INTERNAL_LED;  // Turn off internal LED
+            delay;                   // Wait for a short time
+        } else {
+            IO0CLR |= BUZZER_PIN;  // Turn off buzzer
+        }
+
+        delay;  // Small delay for readability
+    }
+}
+
+void lcd_init(void) {
+    cmd(0x02);  // Initialize in 4-bit mode
+    cmd(0x28);  // 4-bit mode, 2 lines, 5x7 dots
+    cmd(0x0C);  // Display ON, Cursor OFF
+    cmd(0x06);  // Auto-increment cursor
+    cmd(0x01);  // Clear display
+    delay;      // Delay to allow LCD to process the commands
+}
+
+void cmd(unsigned char a) {
+    IO0PIN &= ~(0x7F << 16);    // Clear P0.16 to P0.22
+    IO0PIN |= ((a >> 4) << 19); // Send higher nibble to P0.19 to P0.22
+    IO0CLR |= bit(16);          // RS = 0 for command
+    IO0CLR |= bit(17);          // RW = 0 for write
+    IO0SET |= bit(18);          // EN = 1
+    delay;
+    IO0CLR |= bit(18);          // EN = 0
+
+    IO0PIN &= ~(0x7F << 16);    // Clear P0.16 to P0.22
+    IO0PIN |= ((a & 0x0F) << 19); // Send lower nibble to P0.19 to P0.22
+    IO0CLR |= bit(16);          // RS = 0 for command
+    IO0CLR |= bit(17);          // RW = 0 for write
+    IO0SET |= bit(18);          // EN = 1
+    delay;
+    IO0CLR |= bit(18);          // EN = 0
+}
+
+void dat(unsigned char b) {
+    IO0PIN &= ~(0x7F << 16);    // Clear P0.16 to P0.22
+    IO0PIN |= ((b >> 4) << 19); // Send higher nibble to P0.19 to P0.22
+    IO0SET |= bit(16);          // RS = 1 for data
+    IO0CLR |= bit(17);          // RW = 0 for write
+    IO0SET |= bit(18);          // EN = 1
+    delay;
+    IO0CLR |= bit(18);          // EN = 0
+
+    IO0PIN &= ~(0x7F << 16);    // Clear P0.16 to P0.22
+    IO0PIN |= ((b & 0x0F) << 19); // Send lower nibble to P0.19 to P0.22
+    IO0SET |= bit(16);          // RS = 1 for data
+    IO0CLR |= bit(17);          // RW = 0 for write
+    IO0SET |= bit(18);          // EN = 1
+    delay;
+    IO0CLR |= bit(18);          // EN = 0
+}
+
+void string(char *p) {
+    while (*p != '\0') {
+        dat(*p++);
+    }
+}
+
+void adc_init(void) {
+    // Enable power for ADC0
+    PCONP |= (1 << 12);
+
+    // Set AD0.1 pin (P0.28) for ADC function
+    PINSEL1 &= ~(3 << 24);  // Clear bits
+    PINSEL1 |= (1 << 24);   // Set to 01 for AD0.1
+
+    // Set ADC0 control register
+    AD0CR = (1 << 1) |       // Select AD0.1
+            (4 << 8) |       // ADC clock: PCLK / 5
+            (1 << 21);       // ADC enabled
+}
+
+unsigned int read_adc(void) {
+    unsigned int result;
+
+    AD0CR |= (1 << 24);              // Start conversion
+
+    // Wait for the conversion to complete
+    while (!(AD0DR1 & (1 << 31)));
+
+    result = (AD0DR1 >> 6) & 0x3FF;  // Extract 10-bit result (bits 6-15)
+
+    AD0CR &= ~(1 << 24);             // Stop conversion
+
+    return result;
+}
+
+float read_ultrasonic_distance(void) {
+    float distance;
+    unsigned long start_time, travel_time;
+
+    // Trigger the sensor
+    IO0SET = TRIG_PIN; // Send 10us pulse
+    delay;              // Keep high for 10us
+    IO0CLR = TRIG_PIN; // Pull it low
+
+    // Wait for echo
+    while (!(IO0PIN & ECHO_PIN)); // Wait for echo start
+    start_time = T0TC; // Record start time
+
+    while (IO0PIN & ECHO_PIN); // Wait for echo end
+    travel_time = T0TC - start_time; // Calculate travel time
+
+    // Calculate distance in cm (speed of sound is 34300 cm/s)
+    distance = (travel_time * 0.0343) / 2; // Divide by 2 for one-way distance
+    return distance;
+}
+
+void timer_init(void) {
+    T0TCR = 0x02; // Reset timer
+    T0PR = 15;    // Set prescaler for 1us resolution
+    T0TCR = 0x01; // Enable timer
+}
+
+void display_sensor_values(float water_level, unsigned int force_value) {
+    char buffer[16];
+    sprintf(buffer, "Force: %u", force_value);
+    cmd(0x01);      // Clear display
+    delay;          // Delay to allow LCD to process the command
+    string(buffer); // Display force value on LCD
+
+    sprintf(buffer, "Water: %.2f cm", water_level);
+    cmd(0xC0);      // Move to second line
+    string(buffer); // Display water level on LCD
+}
